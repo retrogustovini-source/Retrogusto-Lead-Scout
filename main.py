@@ -326,9 +326,9 @@ async def main():
 
         # Build summary message
         today_str = date.today().strftime("%d/%m/%Y")
-        lines = [f"🍷 <b>Retrogusto Lead Scout — {today_str}</b>"]
-        lines.append(f"Trovati <b>{len(new_leads)} nuovi lead</b> questa settimana:\n")
 
+        # Build individual lead lines
+        lead_lines = []
         for i, lead in enumerate(new_leads, 1):
             line = f"{i}. <b>{lead['name']}</b> — {lead['type']}, {lead['zone']}"
             if lead.get("phone"):
@@ -336,17 +336,35 @@ async def main():
             if lead.get("website"):
                 line += f"\n    🌐 {lead['website']}"
             if lead.get("rating"):
-                line += f"\n    ⭐ {lead['rating']} ({lead.get('reviews', '?')} recensioni)"
-            lines.append(line)
+                line += f"\n    ⭐ {lead['rating']} ({lead.get('reviews', '?')} rec.)"
+            lead_lines.append(line)
 
-        lines.append("\n📎 File xlsx aggiornato allegato.")
-        message = "\n".join(lines)
+        # Split into chunks under 4000 chars
+        def build_chunks(lead_lines, header, max_chars=4000):
+            chunks = []
+            current = header + "\n"
+            for line in lead_lines:
+                if len(current) + len(line) + 2 > max_chars:
+                    chunks.append(current)
+                    current = line + "\n"
+                else:
+                    current += line + "\n"
+            if current.strip():
+                chunks.append(current)
+            return chunks
+
+        header = f"🍷 <b>Retrogusto Lead Scout — {today_str}</b>\nTrovati <b>{len(new_leads)} nuovi lead</b> questa settimana:\n"
+        chunks = build_chunks(lead_lines, header)
 
         # Save xlsx
         output_path = append_leads_to_xlsx(XLSX_PATH, new_leads)
 
-        # Send message
-        await send_telegram_message(client, message)
+        # Send all message chunks
+        for idx, chunk in enumerate(chunks):
+            if idx == len(chunks) - 1:
+                chunk += "\n\n📎 File xlsx aggiornato allegato."
+            await send_telegram_message(client, chunk)
+            await asyncio.sleep(0.5)
 
         # Send file
         await send_telegram_file(
