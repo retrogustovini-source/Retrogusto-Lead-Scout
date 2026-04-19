@@ -1,3 +1,9 @@
+import subprocess
+import sys
+
+# Auto-install dependencies at startup
+subprocess.check_call([sys.executable, "-m", "pip", "install", "httpx==0.27.0", "openpyxl==3.1.2", "-q"])
+
 import os
 import re
 import asyncio
