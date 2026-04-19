@@ -6,14 +6,13 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", "httpx==0.27.0", 
 
 import os
 import re
+import csv
 import asyncio
 import logging
 from datetime import datetime, date
 import httpx
 import openpyxl
 from openpyxl import load_workbook
-from copy import copy
-import io
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -24,7 +23,6 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 XLSX_PATH = os.environ.get("XLSX_PATH", "leads.xlsx")
 
-# Search queries for Prague wine/food venues
 SEARCH_QUERIES = [
     "wine bar Praha",
     "vinoteka Praha",
@@ -34,34 +32,27 @@ SEARCH_QUERIES = [
     "vinarna Praha",
 ]
 
-# Venue types to include (from Google Places types)
-INCLUDE_TYPES = {"restaurant", "bar", "food", "cafe", "night_club", "establishment"}
-
-# Keywords in name that suggest wine focus
 WINE_KEYWORDS = [
     "wine", "vino", "vinoteka", "vinarna", "enoteca", "wein", "vin ",
     "vinice", "sommelier", "cava", "cellar", "sklep", "degustace",
-    "bacchus", "bacchante", "vinny", "vinné", "enolog"
+    "bacchus", "vinny", "vinné", "enolog"
 ]
 
-# Keywords that suggest NOT a good fit
 EXCLUDE_KEYWORDS = [
     "supermarket", "tesco", "albert", "billa", "lidl", "penny",
-    "kaufland", "spar", "hotel chain", "fast food", "mcdonald", "kfc",
-    "subway", "burger", "kebab", "sushi conveyor"
+    "kaufland", "spar", "fast food", "mcdonald", "kfc", "subway",
+    "burger", "kebab", "karaoke"
 ]
 
 
 def normalize_name(name: str) -> str:
-    """Lowercase and strip for comparison."""
     return re.sub(r'\s+', ' ', name.lower().strip())
 
 
 def load_existing_leads(xlsx_path: str) -> set:
-    """Load existing lead names from the xlsx file."""
     existing = set()
     if not os.path.exists(xlsx_path):
-        log.warning(f"XLSX not found at {xlsx_path}, will create fresh.")
+        log.warning(f"XLSX not found at {xlsx_path}")
         return existing
     wb = load_workbook(xlsx_path, read_only=True)
     ws = wb["Leads"]
@@ -77,7 +68,6 @@ def load_existing_leads(xlsx_path: str) -> set:
 
 
 def is_wine_relevant(name: str, types: list) -> bool:
-    """Check if venue is likely wine-relevant."""
     name_lower = name.lower()
     for kw in WINE_KEYWORDS:
         if kw in name_lower:
@@ -97,7 +87,6 @@ def has_exclude_keyword(name: str) -> bool:
 
 
 async def search_places(client: httpx.AsyncClient, query: str) -> list:
-    """Search places using Google Places API (New) Text Search."""
     url = "https://places.googleapis.com/v1/places:searchText"
     headers = {
         "Content-Type": "application/json",
@@ -105,8 +94,7 @@ async def search_places(client: httpx.AsyncClient, query: str) -> list:
         "X-Goog-FieldMask": (
             "places.displayName,places.formattedAddress,"
             "places.nationalPhoneNumber,places.websiteUri,"
-            "places.types,places.rating,places.userRatingCount,"
-            "places.priceLevel,places.id"
+            "places.types,places.rating,places.userRatingCount,places.id"
         )
     }
     payload = {
@@ -123,28 +111,23 @@ async def search_places(client: httpx.AsyncClient, query: str) -> list:
     try:
         resp = await client.post(url, headers=headers, json=payload, timeout=15)
         resp.raise_for_status()
-        data = resp.json()
-        return data.get("places", [])
+        return resp.json().get("places", [])
     except Exception as e:
         log.error(f"Error searching '{query}': {e}")
         return []
 
 
 def extract_zone(address: str) -> str:
-    """Try to extract Praha zone from address."""
     if not address:
         return "praga"
     address_lower = address.lower()
-    # Look for Praha X pattern
     match = re.search(r'praha\s*(\d+)', address_lower)
     if match:
         return f"praga {match.group(1)}"
-    # Look for district names
     districts = [
         "vinohrady", "žižkov", "smíchov", "dejvice", "holešovice",
-        "nusle", "vršovice", "karlín", "florenc", "josefov", "malá strana",
-        "hradčany", "nové město", "staré město", "letná", "bubeneč",
-        "strašnice", "michle", "pankrác", "anděl", "andel", "nusle"
+        "nusle", "vršovice", "karlín", "florenc", "josefov",
+        "letná", "bubeneč", "andel", "anděl", "pankrác"
     ]
     for d in districts:
         if d in address_lower:
@@ -153,7 +136,6 @@ def extract_zone(address: str) -> str:
 
 
 def guess_type(types: list, name: str) -> str:
-    """Guess venue type from Google types and name."""
     name_lower = name.lower()
     if any(w in name_lower for w in ["vinoteka", "vinarna", "enoteca", "wine bar", "vinný bar"]):
         return "Wine Bar"
@@ -163,79 +145,52 @@ def guess_type(types: list, name: str) -> str:
         return "Ristorante"
     if "bar" in types:
         return "Wine Bar"
-    if "cafe" in types:
-        return "Ristorante"
     return "Ristorante"
 
 
-def guess_language(address: str) -> str:
-    """Default to CZ for Prague."""
-    return "CZ"
-
-
-def append_leads_to_xlsx(xlsx_path: str, new_leads: list) -> str:
-    """Append new leads to xlsx and return path of new file."""
+def save_leads_to_csv(new_leads: list) -> str:
     today_str = date.today().strftime("%Y-%m-%d")
-    output_path = f"leads_updated_{today_str}.xlsx"
+    output_path = f"nuovi_lead_{today_str}.csv"
+    today_display = date.today().strftime("%d/%m/%Y")
 
-    if os.path.exists(xlsx_path):
-        wb = load_workbook(xlsx_path)
-    else:
-        wb = openpyxl.Workbook()
-        wb.active.title = "Leads"
-        ws = wb["Leads"]
-        headers = [
-            "Lead Name", "Type", "Language", "Zone", "Contact Channels",
-            "Contact Quality", "Situation", "Status", "Priority",
-            "Date Added", "Last Contact Date", "Next Follow-up Date",
-            "Follow-up Strategy", "Last Email Sent (text)", "Last Message / Notes",
-            "Next Action", "Probability (%)", "email", "telefono"
-        ]
-        ws.append(headers)
+    headers = [
+        "Lead Name", "Type", "Language", "Zone", "Contact Channels",
+        "Contact Quality", "Situation", "Status", "Priority",
+        "Date Added", "Next Action", "Probability (%)",
+        "email", "telefono", "website", "rating", "recensioni"
+    ]
 
-    ws = wb["Leads"]
+    with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        for lead in new_leads:
+            writer.writerow([
+                lead["name"],
+                lead["type"],
+                "CZ",
+                lead["zone"],
+                "Email",
+                "freddo",
+                "cold mail",
+                "Waiting",
+                "Media",
+                today_display,
+                "Email follow-up",
+                0.2,
+                lead.get("email", ""),
+                lead.get("phone", ""),
+                lead.get("website", ""),
+                lead.get("rating", ""),
+                lead.get("reviews", ""),
+            ])
 
-    # Find last row
-    last_row = ws.max_row
-
-    today_excel = (date.today() - date(1899, 12, 30)).days  # Excel serial date
-
-    for lead in new_leads:
-        row = [
-            lead["name"],           # Lead Name
-            lead["type"],           # Type
-            lead["language"],       # Language
-            lead["zone"],           # Zone
-            "Email",                # Contact Channels
-            "freddo",               # Contact Quality
-            "cold mail",            # Situation
-            "Waiting",              # Status
-            "Media",                # Priority
-            today_excel,            # Date Added
-            None,                   # Last Contact Date
-            None,                   # Next Follow-up Date
-            None,                   # Follow-up Strategy
-            None,                   # Last Email Sent
-            f"Auto-aggiunto da Lead Scout. Sito: {lead.get('website', '')}. Rating: {lead.get('rating', '')} ({lead.get('reviews', '')} recensioni)",
-            "Email follow-up",      # Next Action
-            0.2,                    # Probability
-            lead.get("email", ""),  # email
-            lead.get("phone", ""),  # telefono
-        ]
-        ws.append(row)
-
-    wb.save(output_path)
-    log.info(f"Saved updated xlsx to {output_path}")
+    log.info(f"Saved CSV to {output_path}")
     return output_path
 
 
 async def send_telegram_message(client: httpx.AsyncClient, text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML"
-    }
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
     resp = await client.post(url, json=payload, timeout=15)
     resp.raise_for_status()
 
@@ -243,7 +198,7 @@ async def send_telegram_message(client: httpx.AsyncClient, text: str):
 async def send_telegram_file(client: httpx.AsyncClient, file_path: str, caption: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
     with open(file_path, "rb") as f:
-        files = {"document": (os.path.basename(file_path), f, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+        files = {"document": (os.path.basename(file_path), f, "text/csv")}
         data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
         resp = await client.post(url, data=data, files=files, timeout=30)
         resp.raise_for_status()
@@ -273,46 +228,31 @@ async def main():
                 name = place.get("displayName", {}).get("text", "")
                 if not name:
                     continue
-
-                # Skip excluded keywords
                 if has_exclude_keyword(name):
                     continue
-
-                # Check not already in CRM
                 if normalize_name(name) in existing_leads:
                     log.info(f"  → già nel CRM: {name}")
                     continue
 
                 types = place.get("types", [])
-
-                # Check if wine-relevant
                 if not is_wine_relevant(name, types):
-                    # Still include restaurants but mark as lower priority
                     if "restaurant" not in types and "bar" not in types:
                         continue
-
-                address = place.get("formattedAddress", "")
-                phone = place.get("nationalPhoneNumber", "")
-                website = place.get("websiteUri", "")
-                rating = place.get("rating", "")
-                reviews = place.get("userRatingCount", "")
 
                 lead = {
                     "name": name,
                     "type": guess_type(types, name),
-                    "language": guess_language(address),
-                    "zone": extract_zone(address),
-                    "phone": phone,
-                    "website": website,
+                    "zone": extract_zone(place.get("formattedAddress", "")),
+                    "phone": place.get("nationalPhoneNumber", ""),
+                    "website": place.get("websiteUri", ""),
                     "email": "",
-                    "rating": rating,
-                    "reviews": reviews,
-                    "address": address,
+                    "rating": place.get("rating", ""),
+                    "reviews": place.get("userRatingCount", ""),
                 }
                 new_leads.append(lead)
                 log.info(f"  ✅ Nuovo lead: {name} ({lead['type']}, {lead['zone']})")
 
-            await asyncio.sleep(1)  # be polite with the API
+            await asyncio.sleep(1)
 
     log.info(f"Nuovi lead trovati: {len(new_leads)}")
 
@@ -324,10 +264,9 @@ async def main():
             )
             return
 
-        # Build summary message
         today_str = date.today().strftime("%d/%m/%Y")
 
-        # Build individual lead lines
+        # Build lead lines
         lead_lines = []
         for i, lead in enumerate(new_leads, 1):
             line = f"{i}. <b>{lead['name']}</b> — {lead['type']}, {lead['zone']}"
@@ -340,37 +279,33 @@ async def main():
             lead_lines.append(line)
 
         # Split into chunks under 4000 chars
-        def build_chunks(lead_lines, header, max_chars=4000):
-            chunks = []
-            current = header + "\n"
-            for line in lead_lines:
-                if len(current) + len(line) + 2 > max_chars:
-                    chunks.append(current)
-                    current = line + "\n"
-                else:
-                    current += line + "\n"
-            if current.strip():
+        header = f"🍷 <b>Retrogusto Lead Scout — {today_str}</b>\nTrovati <b>{len(new_leads)} nuovi lead</b>:\n"
+        chunks = []
+        current = header
+        for line in lead_lines:
+            if len(current) + len(line) + 2 > 4000:
                 chunks.append(current)
-            return chunks
+                current = line + "\n"
+            else:
+                current += line + "\n"
+        if current.strip():
+            chunks.append(current)
 
-        header = f"🍷 <b>Retrogusto Lead Scout — {today_str}</b>\nTrovati <b>{len(new_leads)} nuovi lead</b> questa settimana:\n"
-        chunks = build_chunks(lead_lines, header)
+        # Save CSV
+        csv_path = save_leads_to_csv(new_leads)
 
-        # Save xlsx
-        output_path = append_leads_to_xlsx(XLSX_PATH, new_leads)
-
-        # Send all message chunks
+        # Send messages
         for idx, chunk in enumerate(chunks):
             if idx == len(chunks) - 1:
-                chunk += "\n\n📎 File xlsx aggiornato allegato."
+                chunk += "\n\n📎 CSV con i nuovi lead allegato."
             await send_telegram_message(client, chunk)
             await asyncio.sleep(0.5)
 
-        # Send file
+        # Send CSV
         await send_telegram_file(
             client,
-            output_path,
-            f"CRM aggiornato — {len(new_leads)} nuovi lead — {today_str}"
+            csv_path,
+            f"Nuovi lead Retrogusto — {len(new_leads)} — {today_str}"
         )
 
     log.info("✅ Completato")
