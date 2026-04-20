@@ -2,16 +2,16 @@ import subprocess
 import sys
 
 # Auto-install dependencies at startup
-subprocess.check_call([sys.executable, "-m", "pip", "install", "httpx==0.27.0", "openpyxl==3.1.2", "-q"])
+subprocess.check_call([sys.executable, "-m", "pip", "install", "httpx==0.27.0", "openpyxl==3.1.2", "psycopg2-binary==2.9.9", "-q"])
 
 import os
 import re
 import csv
 import asyncio
 import logging
-from datetime import datetime, date
+from datetime import date
 import httpx
-import openpyxl
+import psycopg2
 from openpyxl import load_workbook
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -22,6 +22,7 @@ GOOGLE_API_KEY = os.environ["GOOGLE_API_KEY"]
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 XLSX_PATH = os.environ.get("XLSX_PATH", "leads.xlsx")
+DATABASE_URL = os.environ["DATABASE_URL"]
 
 SEARCH_QUERIES = [
     "wine bar Praha",
@@ -49,7 +50,62 @@ def normalize_name(name: str) -> str:
     return re.sub(r'\s+', ' ', name.lower().strip())
 
 
-def load_existing_leads(xlsx_path: str) -> set:
+# --- DATABASE ---
+
+def get_db_conn():
+    return psycopg2.connect(DATABASE_URL)
+
+
+def init_db():
+    """Create found_leads table if not exists."""
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS found_leads (
+            id SERIAL PRIMARY KEY,
+            name_normalized TEXT UNIQUE NOT NULL,
+            name_original TEXT NOT NULL,
+            found_date DATE NOT NULL DEFAULT CURRENT_DATE
+        )
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
+    log.info("DB inizializzato")
+
+
+def load_known_leads_from_db() -> set:
+    """Load all already-found lead names from DB."""
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT name_normalized FROM found_leads")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return {row[0] for row in rows}
+
+
+def save_leads_to_db(new_leads: list):
+    """Save new leads to DB to avoid future duplicates."""
+    conn = get_db_conn()
+    cur = conn.cursor()
+    for lead in new_leads:
+        try:
+            cur.execute(
+                "INSERT INTO found_leads (name_normalized, name_original) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (normalize_name(lead["name"]), lead["name"])
+            )
+        except Exception as e:
+            log.warning(f"DB insert error for {lead['name']}: {e}")
+    conn.commit()
+    cur.close()
+    conn.close()
+    log.info(f"Salvati {len(new_leads)} nuovi lead nel DB")
+
+
+# --- XLSX ---
+
+def load_existing_leads_from_xlsx(xlsx_path: str) -> set:
     existing = set()
     if not os.path.exists(xlsx_path):
         log.warning(f"XLSX not found at {xlsx_path}")
@@ -67,24 +123,7 @@ def load_existing_leads(xlsx_path: str) -> set:
     return existing
 
 
-def is_wine_relevant(name: str, types: list) -> bool:
-    name_lower = name.lower()
-    for kw in WINE_KEYWORDS:
-        if kw in name_lower:
-            return True
-    for t in types:
-        if t in ("bar", "night_club"):
-            return True
-    return False
-
-
-def has_exclude_keyword(name: str) -> bool:
-    name_lower = name.lower()
-    for kw in EXCLUDE_KEYWORDS:
-        if kw in name_lower:
-            return True
-    return False
-
+# --- PLACES ---
 
 async def search_places(client: httpx.AsyncClient, query: str) -> list:
     url = "https://places.googleapis.com/v1/places:searchText"
@@ -148,6 +187,20 @@ def guess_type(types: list, name: str) -> str:
     return "Ristorante"
 
 
+def has_exclude_keyword(name: str) -> bool:
+    name_lower = name.lower()
+    return any(kw in name_lower for kw in EXCLUDE_KEYWORDS)
+
+
+def is_wine_relevant(name: str, types: list) -> bool:
+    name_lower = name.lower()
+    if any(kw in name_lower for kw in WINE_KEYWORDS):
+        return True
+    return any(t in ("bar", "night_club") for t in types)
+
+
+# --- CSV ---
+
 def save_leads_to_csv(new_leads: list) -> str:
     today_str = date.today().strftime("%Y-%m-%d")
     output_path = f"nuovi_lead_{today_str}.csv"
@@ -165,33 +218,23 @@ def save_leads_to_csv(new_leads: list) -> str:
         writer.writerow(headers)
         for lead in new_leads:
             writer.writerow([
-                lead["name"],
-                lead["type"],
-                "CZ",
-                lead["zone"],
-                "Email",
-                "freddo",
-                "cold mail",
-                "Waiting",
-                "Media",
-                today_display,
-                "Email follow-up",
-                0.2,
-                lead.get("email", ""),
-                lead.get("phone", ""),
-                lead.get("website", ""),
-                lead.get("rating", ""),
+                lead["name"], lead["type"], "CZ", lead["zone"],
+                "Email", "freddo", "cold mail", "Waiting", "Media",
+                today_display, "Email follow-up", 0.2,
+                lead.get("email", ""), lead.get("phone", ""),
+                lead.get("website", ""), lead.get("rating", ""),
                 lead.get("reviews", ""),
             ])
 
-    log.info(f"Saved CSV to {output_path}")
+    log.info(f"CSV salvato: {output_path}")
     return output_path
 
 
+# --- TELEGRAM ---
+
 async def send_telegram_message(client: httpx.AsyncClient, text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-    resp = await client.post(url, json=payload, timeout=15)
+    resp = await client.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=15)
     resp.raise_for_status()
 
 
@@ -204,11 +247,19 @@ async def send_telegram_file(client: httpx.AsyncClient, file_path: str, caption:
         resp.raise_for_status()
 
 
+# --- MAIN ---
+
 async def main():
     log.info("🍷 Retrogusto Lead Scout avviato")
 
-    existing_leads = load_existing_leads(XLSX_PATH)
-    log.info(f"Lead esistenti nel CRM: {len(existing_leads)}")
+    # Init DB
+    init_db()
+
+    # Load known leads from both xlsx and DB
+    xlsx_leads = load_existing_leads_from_xlsx(XLSX_PATH)
+    db_leads = load_known_leads_from_db()
+    known_leads = xlsx_leads | db_leads
+    log.info(f"Lead noti: {len(xlsx_leads)} da xlsx + {len(db_leads)} da DB = {len(known_leads)} totali")
 
     new_leads = []
     seen_place_ids = set()
@@ -226,12 +277,10 @@ async def main():
                 seen_place_ids.add(place_id)
 
                 name = place.get("displayName", {}).get("text", "")
-                if not name:
+                if not name or has_exclude_keyword(name):
                     continue
-                if has_exclude_keyword(name):
-                    continue
-                if normalize_name(name) in existing_leads:
-                    log.info(f"  → già nel CRM: {name}")
+                if normalize_name(name) in known_leads:
+                    log.info(f"  → già noto: {name}")
                     continue
 
                 types = place.get("types", [])
@@ -264,9 +313,12 @@ async def main():
             )
             return
 
+        # Save to DB FIRST to avoid future duplicates
+        save_leads_to_db(new_leads)
+
         today_str = date.today().strftime("%d/%m/%Y")
 
-        # Build lead lines
+        # Build message chunks
         lead_lines = []
         for i, lead in enumerate(new_leads, 1):
             line = f"{i}. <b>{lead['name']}</b> — {lead['type']}, {lead['zone']}"
@@ -278,7 +330,6 @@ async def main():
                 line += f"\n    ⭐ {lead['rating']} ({lead.get('reviews', '?')} rec.)"
             lead_lines.append(line)
 
-        # Split into chunks under 4000 chars
         header = f"🍷 <b>Retrogusto Lead Scout — {today_str}</b>\nTrovati <b>{len(new_leads)} nuovi lead</b>:\n"
         chunks = []
         current = header
@@ -302,11 +353,7 @@ async def main():
             await asyncio.sleep(0.5)
 
         # Send CSV
-        await send_telegram_file(
-            client,
-            csv_path,
-            f"Nuovi lead Retrogusto — {len(new_leads)} — {today_str}"
-        )
+        await send_telegram_file(client, csv_path, f"Nuovi lead Retrogusto — {len(new_leads)} — {today_str}")
 
     log.info("✅ Completato")
 
