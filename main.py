@@ -80,7 +80,7 @@ EXCLUDE_KEYWORDS = [
     "supermarket", "tesco", "albert", "billa", "lidl", "penny", "kaufland", "spar",
     "mcdonald", "kfc", "subway", "burger king", "pizza hut", "domino",
     "kebab", "kebap", "gyros", "karaoke",
-    "cukrarna", "cukrárna", "pekarna", "pekárna", "pastry", "bakery",
+    "cukrarna", "cukrárna", "pekarna", "pekárna", "pastry", "bakery", "cake", "cakes", "dorty",
     "pivnice", "pivovar", "brewery", "birreria", "beerhouse", "beer house",
     "hospoda", "hospůdka", "pub ",
     "benzinka", "čerpací", "gas station",
