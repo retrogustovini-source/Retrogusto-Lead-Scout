@@ -1,7 +1,6 @@
 import subprocess
 import sys
 
-# Auto-install dependencies at startup
 subprocess.check_call([sys.executable, "-m", "pip", "install", "httpx==0.27.0", "openpyxl==3.1.2", "psycopg2-binary==2.9.9", "-q"])
 
 import os
@@ -17,7 +16,6 @@ from openpyxl import load_workbook
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-# --- CONFIG ---
 GOOGLE_API_KEY = os.environ["GOOGLE_API_KEY"]
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -25,24 +23,68 @@ XLSX_PATH = os.environ.get("XLSX_PATH", "leads.xlsx")
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 SEARCH_QUERIES = [
-    "wine bar Praha",
-    "vinoteka Praha",
-    "enoteca Praha",
-    "ristorante italiano Praha",
-    "bistro vino Praha",
-    "vinarna Praha",
+    ("wine bar Praha 1", 50.0878, 14.4205, 3000),
+    ("wine bar Praha 2", 50.0750, 14.4378, 3000),
+    ("wine bar Praha 3", 50.0833, 14.4667, 3000),
+    ("wine bar Praha 4", 50.0400, 14.4500, 4000),
+    ("wine bar Praha 5", 50.0667, 14.3833, 4000),
+    ("wine bar Praha 6", 50.1000, 14.3833, 4000),
+    ("wine bar Praha 7", 50.1000, 14.4333, 3000),
+    ("wine bar Praha 8", 50.1167, 14.4667, 4000),
+    ("wine bar Praha 9", 50.1333, 14.5000, 4000),
+    ("wine bar Praha 10", 50.0667, 14.5000, 4000),
+    ("vinoteka Praha 1", 50.0878, 14.4205, 3000),
+    ("vinoteka Praha 2", 50.0750, 14.4378, 3000),
+    ("vinoteka Praha 3", 50.0833, 14.4667, 3000),
+    ("vinoteka Praha 4", 50.0400, 14.4500, 4000),
+    ("vinoteka Praha 5", 50.0667, 14.3833, 4000),
+    ("enoteca Praha", 50.0755, 14.4378, 15000),
+    ("vinarna Praha", 50.0755, 14.4378, 15000),
+    ("ristorante italiano Praha 1", 50.0878, 14.4205, 3000),
+    ("ristorante italiano Praha 2", 50.0750, 14.4378, 3000),
+    ("ristorante italiano Praha 3", 50.0833, 14.4667, 3000),
+    ("restaurant wine list Praha", 50.0755, 14.4378, 15000),
+    ("bistro wine Praha", 50.0755, 14.4378, 15000),
+    ("degustace vina Praha", 50.0755, 14.4378, 15000),
+    ("wine bar Kladno", 50.1479, 14.1011, 8000),
+    ("vinoteka Kladno", 50.1479, 14.1011, 8000),
+    ("wine bar Beroun", 49.9603, 14.0706, 6000),
+    ("vinoteka Beroun", 49.9603, 14.0706, 6000),
+    ("wine bar Melnik", 50.3500, 14.4833, 6000),
+    ("vinoteka Melnik", 50.3500, 14.4833, 6000),
+    ("wine bar Mlada Boleslav", 50.4131, 14.9058, 6000),
+    ("wine bar Kolin", 50.0269, 15.2000, 6000),
+    ("vinoteka Kolin", 50.0269, 15.2000, 6000),
+    ("wine bar Ricany", 49.9931, 14.6556, 5000),
+    ("wine bar Benesov", 49.7817, 14.6858, 5000),
+    ("vinoteka Benesov", 49.7817, 14.6858, 5000),
+    ("wine bar Brandys nad Labem", 50.1833, 14.6667, 5000),
+    ("wine bar Neratovice", 50.2592, 14.5178, 5000),
+    ("ristorante italiano Kladno", 50.1479, 14.1011, 8000),
+    ("ristorante italiano Beroun", 49.9603, 14.0706, 6000),
+    ("ristorante italiano Melnik", 50.3500, 14.4833, 6000),
 ]
 
-WINE_KEYWORDS = [
-    "wine", "vino", "vinoteka", "vinarna", "enoteca", "wein", "vin ",
+WINE_SIGNALS_NAME = [
+    "wine", "vino", "vinoteka", "vinarna", "enoteca", "wein",
     "vinice", "sommelier", "cava", "cellar", "sklep", "degustace",
-    "bacchus", "vinny", "vinné", "enolog"
+    "bacchus", "vinný", "vinné", "enolog", "vinařství", "prosecco",
+    "champagne", "barrique", "cantina", "osteria", "trattoria",
+    "ristorante", "italiano", "italiana", "bistro", "brasserie",
+    "vinotéka", "vinárna",
 ]
+
+WINE_SIGNALS_TYPES = {"bar", "night_club"}
 
 EXCLUDE_KEYWORDS = [
-    "supermarket", "tesco", "albert", "billa", "lidl", "penny",
-    "kaufland", "spar", "fast food", "mcdonald", "kfc", "subway",
-    "burger", "kebab", "karaoke"
+    "supermarket", "tesco", "albert", "billa", "lidl", "penny", "kaufland", "spar",
+    "mcdonald", "kfc", "subway", "burger king", "pizza hut", "domino",
+    "kebab", "kebap", "gyros", "karaoke",
+    "cukrarna", "cukrárna", "pekarna", "pekárna", "pastry", "bakery",
+    "pivnice", "pivovar", "brewery", "birreria", "beerhouse", "beer house",
+    "hospoda", "hospůdka", "pub ",
+    "benzinka", "čerpací", "gas station",
+    "lékárna", "pharmacy", "fitness", "gym",
 ]
 
 
@@ -50,14 +92,23 @@ def normalize_name(name: str) -> str:
     return re.sub(r'\s+', ' ', name.lower().strip())
 
 
-# --- DATABASE ---
+def has_wine_signal(name: str, types: list) -> bool:
+    name_lower = name.lower()
+    if any(kw in name_lower for kw in WINE_SIGNALS_NAME):
+        return True
+    return any(t in WINE_SIGNALS_TYPES for t in types)
+
+
+def has_exclude_keyword(name: str) -> bool:
+    name_lower = name.lower()
+    return any(kw in name_lower for kw in EXCLUDE_KEYWORDS)
+
 
 def get_db_conn():
     return psycopg2.connect(DATABASE_URL)
 
 
 def init_db():
-    """Create found_leads table if not exists."""
     conn = get_db_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -75,7 +126,6 @@ def init_db():
 
 
 def load_known_leads_from_db() -> set:
-    """Load all already-found lead names from DB."""
     conn = get_db_conn()
     cur = conn.cursor()
     cur.execute("SELECT name_normalized FROM found_leads")
@@ -86,7 +136,6 @@ def load_known_leads_from_db() -> set:
 
 
 def save_leads_to_db(new_leads: list):
-    """Save new leads to DB to avoid future duplicates."""
     conn = get_db_conn()
     cur = conn.cursor()
     for lead in new_leads:
@@ -100,10 +149,8 @@ def save_leads_to_db(new_leads: list):
     conn.commit()
     cur.close()
     conn.close()
-    log.info(f"Salvati {len(new_leads)} nuovi lead nel DB")
+    log.info(f"Salvati {len(new_leads)} lead nel DB")
 
-
-# --- XLSX ---
 
 def load_existing_leads_from_xlsx(xlsx_path: str) -> set:
     existing = set()
@@ -123,9 +170,7 @@ def load_existing_leads_from_xlsx(xlsx_path: str) -> set:
     return existing
 
 
-# --- PLACES ---
-
-async def search_places(client: httpx.AsyncClient, query: str) -> list:
+async def search_places(client: httpx.AsyncClient, query: str, lat: float, lng: float, radius: int) -> list:
     url = "https://places.googleapis.com/v1/places:searchText"
     headers = {
         "Content-Type": "application/json",
@@ -142,8 +187,8 @@ async def search_places(client: httpx.AsyncClient, query: str) -> list:
         "maxResultCount": 20,
         "locationBias": {
             "circle": {
-                "center": {"latitude": 50.0755, "longitude": 14.4378},
-                "radius": 15000.0
+                "center": {"latitude": lat, "longitude": lng},
+                "radius": float(radius)
             }
         }
     }
@@ -156,17 +201,25 @@ async def search_places(client: httpx.AsyncClient, query: str) -> list:
         return []
 
 
-def extract_zone(address: str) -> str:
+def extract_zone(address: str, query: str) -> str:
     if not address:
         return "praga"
     address_lower = address.lower()
+    cities = {
+        "kladno": "Kladno", "beroun": "Beroun", "mělník": "Mělník", "melnik": "Mělník",
+        "mladá boleslav": "Mladá Boleslav", "kolín": "Kolín", "kolin": "Kolín",
+        "říčany": "Říčany", "ricany": "Říčany", "benešov": "Benešov", "benesov": "Benešov",
+        "brandýs": "Brandýs n.L.", "neratovice": "Neratovice",
+    }
+    for key, val in cities.items():
+        if key in address_lower or key in query.lower():
+            return val
     match = re.search(r'praha\s*(\d+)', address_lower)
     if match:
         return f"praga {match.group(1)}"
     districts = [
         "vinohrady", "žižkov", "smíchov", "dejvice", "holešovice",
-        "nusle", "vršovice", "karlín", "florenc", "josefov",
-        "letná", "bubeneč", "andel", "anděl", "pankrác"
+        "nusle", "vršovice", "karlín", "josefov", "letná", "bubeneč", "anděl", "pankrác"
     ]
     for d in districts:
         if d in address_lower:
@@ -176,10 +229,10 @@ def extract_zone(address: str) -> str:
 
 def guess_type(types: list, name: str) -> str:
     name_lower = name.lower()
-    if any(w in name_lower for w in ["vinoteka", "vinarna", "enoteca", "wine bar", "vinný bar"]):
+    if any(w in name_lower for w in ["vinoteka", "vinarna", "enoteca", "wine bar", "vinný bar", "vinotéka", "vinárna"]):
         return "Wine Bar"
-    if any(w in name_lower for w in ["enoteca", "vinoteka", "wine shop"]):
-        return "Enoteca"
+    if any(w in name_lower for w in ["trattoria", "ristorante", "osteria", "italiano", "italiana"]):
+        return "Ristorante IT"
     if "restaurant" in types:
         return "Ristorante"
     if "bar" in types:
@@ -187,32 +240,16 @@ def guess_type(types: list, name: str) -> str:
     return "Ristorante"
 
 
-def has_exclude_keyword(name: str) -> bool:
-    name_lower = name.lower()
-    return any(kw in name_lower for kw in EXCLUDE_KEYWORDS)
-
-
-def is_wine_relevant(name: str, types: list) -> bool:
-    name_lower = name.lower()
-    if any(kw in name_lower for kw in WINE_KEYWORDS):
-        return True
-    return any(t in ("bar", "night_club") for t in types)
-
-
-# --- CSV ---
-
 def save_leads_to_csv(new_leads: list) -> str:
     today_str = date.today().strftime("%Y-%m-%d")
     output_path = f"nuovi_lead_{today_str}.csv"
     today_display = date.today().strftime("%d/%m/%Y")
-
     headers = [
         "Lead Name", "Type", "Language", "Zone", "Contact Channels",
         "Contact Quality", "Situation", "Status", "Priority",
         "Date Added", "Next Action", "Probability (%)",
         "email", "telefono", "website", "rating", "recensioni"
     ]
-
     with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         writer.writerow(headers)
@@ -221,16 +258,12 @@ def save_leads_to_csv(new_leads: list) -> str:
                 lead["name"], lead["type"], "CZ", lead["zone"],
                 "Email", "freddo", "cold mail", "Waiting", "Media",
                 today_display, "Email follow-up", 0.2,
-                lead.get("email", ""), lead.get("phone", ""),
-                lead.get("website", ""), lead.get("rating", ""),
-                lead.get("reviews", ""),
+                "", lead.get("phone", ""), lead.get("website", ""),
+                lead.get("rating", ""), lead.get("reviews", ""),
             ])
-
     log.info(f"CSV salvato: {output_path}")
     return output_path
 
-
-# --- TELEGRAM ---
 
 async def send_telegram_message(client: httpx.AsyncClient, text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -247,78 +280,64 @@ async def send_telegram_file(client: httpx.AsyncClient, file_path: str, caption:
         resp.raise_for_status()
 
 
-# --- MAIN ---
-
 async def main():
     log.info("🍷 Retrogusto Lead Scout avviato")
-
-    # Init DB
     init_db()
 
-    # Load known leads from both xlsx and DB
     xlsx_leads = load_existing_leads_from_xlsx(XLSX_PATH)
     db_leads = load_known_leads_from_db()
     known_leads = xlsx_leads | db_leads
-    log.info(f"Lead noti: {len(xlsx_leads)} da xlsx + {len(db_leads)} da DB = {len(known_leads)} totali")
+    log.info(f"Lead noti: {len(xlsx_leads)} xlsx + {len(db_leads)} DB = {len(known_leads)} totali")
 
     new_leads = []
     seen_place_ids = set()
 
     async with httpx.AsyncClient() as client:
-        for query in SEARCH_QUERIES:
+        for (query, lat, lng, radius) in SEARCH_QUERIES:
             log.info(f"Ricerca: {query}")
-            places = await search_places(client, query)
+            places = await search_places(client, query, lat, lng, radius)
             log.info(f"  → {len(places)} risultati")
-
             for place in places:
                 place_id = place.get("id", "")
                 if place_id in seen_place_ids:
                     continue
                 seen_place_ids.add(place_id)
-
                 name = place.get("displayName", {}).get("text", "")
-                if not name or has_exclude_keyword(name):
+                if not name:
+                    continue
+                if has_exclude_keyword(name):
+                    log.info(f"  → escluso: {name}")
                     continue
                 if normalize_name(name) in known_leads:
                     log.info(f"  → già noto: {name}")
                     continue
-
                 types = place.get("types", [])
-                if not is_wine_relevant(name, types):
-                    if "restaurant" not in types and "bar" not in types:
-                        continue
-
+                if not has_wine_signal(name, types):
+                    log.info(f"  → no wine signal: {name}")
+                    continue
                 lead = {
                     "name": name,
                     "type": guess_type(types, name),
-                    "zone": extract_zone(place.get("formattedAddress", "")),
+                    "zone": extract_zone(place.get("formattedAddress", ""), query),
                     "phone": place.get("nationalPhoneNumber", ""),
                     "website": place.get("websiteUri", ""),
-                    "email": "",
                     "rating": place.get("rating", ""),
                     "reviews": place.get("userRatingCount", ""),
                 }
                 new_leads.append(lead)
-                log.info(f"  ✅ Nuovo lead: {name} ({lead['type']}, {lead['zone']})")
-
+                log.info(f"  ✅ {name} ({lead['type']}, {lead['zone']})")
             await asyncio.sleep(1)
 
     log.info(f"Nuovi lead trovati: {len(new_leads)}")
 
     async with httpx.AsyncClient() as client:
         if not new_leads:
-            await send_telegram_message(
-                client,
-                "🍷 <b>Retrogusto Lead Scout</b>\n\nNessun nuovo lead trovato questa settimana."
-            )
+            await send_telegram_message(client, "🍷 <b>Retrogusto Lead Scout</b>\n\nNessun nuovo lead trovato questa settimana.")
             return
 
-        # Save to DB FIRST to avoid future duplicates
         save_leads_to_db(new_leads)
-
         today_str = date.today().strftime("%d/%m/%Y")
 
-        # Build message chunks
         lead_lines = []
         for i, lead in enumerate(new_leads, 1):
             line = f"{i}. <b>{lead['name']}</b> — {lead['type']}, {lead['zone']}"
@@ -342,17 +361,14 @@ async def main():
         if current.strip():
             chunks.append(current)
 
-        # Save CSV
         csv_path = save_leads_to_csv(new_leads)
 
-        # Send messages
         for idx, chunk in enumerate(chunks):
             if idx == len(chunks) - 1:
                 chunk += "\n\n📎 CSV con i nuovi lead allegato."
             await send_telegram_message(client, chunk)
             await asyncio.sleep(0.5)
 
-        # Send CSV
         await send_telegram_file(client, csv_path, f"Nuovi lead Retrogusto — {len(new_leads)} — {today_str}")
 
     log.info("✅ Completato")
